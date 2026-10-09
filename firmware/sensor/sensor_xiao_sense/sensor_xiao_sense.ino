@@ -52,10 +52,11 @@
   #define SENSOR_LED_RED 11
 #endif
 
-static uint8_t rx_packet[32];
-static uint8_t tx_packet[20];
+static uint8_t rx_packet[32] __attribute__((aligned(4)));
+static uint8_t tx_packet[20] __attribute__((aligned(4)));
 static volatile uint32_t last_sync_time_us = 0;
 static uint32_t green_led_off_time = 0;
+static uint32_t red_led_off_time = 0;
 
 void setup_radio_receiver() {
     NRF_RADIO->POWER = 0;
@@ -70,7 +71,7 @@ void setup_radio_receiver() {
     NRF_RADIO->PREFIX0 = 0xE7;
     NRF_RADIO->TXADDRESS = 0;
     NRF_RADIO->RXADDRESSES = 1;
-    NRF_RADIO->CRCCNF = 2; // 2 byte CRC, SKIPADDR = Include
+    NRF_RADIO->CRCCNF = 2; // 2 byte CRC, Include Address in CRC calculation
     NRF_RADIO->CRCPOLY = 0x11021;
     NRF_RADIO->CRCINIT = 0xFFFF;
     NRF_RADIO->SHORTS = (1 << 0) | (1 << 1); // READY_START | END_DISABLE
@@ -102,38 +103,46 @@ void send_tdma_reply(int8_t rssi, uint32_t elapsed_us) {
     tx_packet[18] = (uint8_t)rssi;
     tx_packet[19] = 0x01;
 
-    NRF_RADIO->PCNF1 = (20 << 0) | (20 << 8) | (3 << 16) | (0 << 24); // MAXLEN = 20, STATLEN = 20 for 20-byte reply
-    NRF_RADIO->PACKETPTR = (uint32_t)tx_packet;
-    NRF_RADIO->TASKS_TXEN = 1;
-    while (!NRF_RADIO->EVENTS_DISABLED);
+    // 1. Ensure radio is completely Disabled first
+    NRF_RADIO->TASKS_DISABLE = 1;
+    uint32_t start_us = micros();
+    while (NRF_RADIO->STATE != 0 && (micros() - start_us) < 1000);
+
+    // 2. Clear flags and set TX packet parameters
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_END = 0;
     NRF_RADIO->EVENTS_DISABLED = 0;
 
-    NRF_RADIO->PCNF1 = (32 << 0) | (12 << 8) | (3 << 16) | (0 << 24); // Restore MAXLEN = 32, STATLEN = 12 for Beacon RX
+    NRF_RADIO->PCNF1 = (20 << 0) | (20 << 8) | (3 << 16) | (0 << 24); // MAXLEN = 20, STATLEN = 20 for 20-byte reply
+    NRF_RADIO->PACKETPTR = (uint32_t)tx_packet;
+
+    // 3. Start TX
+    NRF_RADIO->TASKS_TXEN = 1;
+
+    // 4. Wait for packet transmission to complete on air (EVENTS_END)
+    start_us = micros();
+    while (!NRF_RADIO->EVENTS_END && (micros() - start_us) < 2000);
+
+    // 5. Turn off TX radio cleanly
+    NRF_RADIO->TASKS_DISABLE = 1;
+    start_us = micros();
+    while (NRF_RADIO->STATE != 0 && (micros() - start_us) < 1000);
+
+    // 6. Restore RX configuration for Beacon receiving
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_END = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->PCNF1 = (32 << 0) | (12 << 8) | (3 << 16) | (0 << 24); // Restore MAXLEN = 32, STATLEN = 12
     NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
     NRF_RADIO->TASKS_RXEN = 1;
 }
 
-// Helper to turn all known onboard LEDs on or off
-void set_onboard_led(bool state_on) {
-#if defined(LED_GREEN)
-    digitalWrite(LED_GREEN, state_on ? LOW : HIGH);
-#endif
-#if defined(LEDG)
-    digitalWrite(LEDG, state_on ? LOW : HIGH);
-#endif
-#if defined(PIN_LED_GREEN)
-    digitalWrite(PIN_LED_GREEN, state_on ? LOW : HIGH);
-#endif
-#if defined(LED_BUILTIN)
-    digitalWrite(LED_BUILTIN, state_on ? LOW : HIGH);
-#endif
-#if defined(LEDR)
-    digitalWrite(LEDR, state_on ? LOW : HIGH);
-#endif
-#if defined(LED_RED)
-    digitalWrite(LED_RED, state_on ? LOW : HIGH);
-#endif
+void set_green_led(bool state_on) {
     digitalWrite(SENSOR_LED_GREEN, state_on ? LOW : HIGH);
+}
+
+void set_red_led(bool state_on) {
+    digitalWrite(SENSOR_LED_RED, state_on ? LOW : HIGH);
 }
 
 void setup() {
@@ -147,37 +156,22 @@ void setup() {
     }
     #endif
 
-    // Initialize all candidate LED pins
-#if defined(LED_GREEN)
-    pinMode(LED_GREEN, OUTPUT);
-#endif
-#if defined(LEDG)
-    pinMode(LEDG, OUTPUT);
-#endif
-#if defined(PIN_LED_GREEN)
-    pinMode(PIN_LED_GREEN, OUTPUT);
-#endif
-#if defined(LED_BUILTIN)
-    pinMode(LED_BUILTIN, OUTPUT);
-#endif
-#if defined(LEDR)
-    pinMode(LEDR, OUTPUT);
-#endif
-#if defined(LED_RED)
-    pinMode(LED_RED, OUTPUT);
-#endif
+    // Ensure 32 MHz External Crystal Oscillator (HFXO) is running for high-precision RF
+    NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+    NRF_CLOCK->TASKS_HFCLKSTART = 1;
+    while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0);
+
     pinMode(SENSOR_LED_GREEN, OUTPUT);
     pinMode(SENSOR_LED_RED, OUTPUT);
+    set_green_led(false);
+    set_red_led(false);
 
-    // Turn all off initially
-    set_onboard_led(false);
-
-    // 3 quick power-on test blinks so the user can verify the sensor booted and LEDs work!
+    // 3 quick power-on test blinks
     for (int i = 0; i < 3; i++) {
-        set_onboard_led(true);
-        delay(120);
-        set_onboard_led(false);
-        delay(120);
+        set_green_led(true);
+        delay(100);
+        set_green_led(false);
+        delay(100);
     }
 
     setup_timer_and_ppi();
@@ -192,21 +186,51 @@ static inline uint32_t read_timer1_us() {
 void loop() {
     if (NRF_RADIO->EVENTS_CRCOK) {
         NRF_RADIO->EVENTS_CRCOK = 0;
+        NRF_RADIO->EVENTS_END = 0;
+        NRF_RADIO->EVENTS_ADDRESS = 0;
+        NRF_RADIO->EVENTS_DISABLED = 0;
         if (rx_packet[0] == SYNC_MAGIC_BYTE) {
-            set_onboard_led(true);
+            set_green_led(true);
             green_led_off_time = millis() + 100;
             uint32_t now_us = read_timer1_us();
             uint32_t elapsed_us = (last_sync_time_us > 0) ? (now_us - last_sync_time_us) : 1000000;
             last_sync_time_us = now_us;
             int8_t rssi = -1 * (int8_t)NRF_RADIO->RSSISAMPLE;
-            while (read_timer1_us() < (uint32_t)(SENSOR_ID * 1000));
+            
+            // TDMA slot delay: wait 800 us after beacon end before sending reply
+            delayMicroseconds(800 * SENSOR_ID);
             send_tdma_reply(rssi, elapsed_us);
         } else {
+            NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
             NRF_RADIO->TASKS_RXEN = 1;
         }
+    } else if (NRF_RADIO->EVENTS_CRCERROR) {
+        NRF_RADIO->EVENTS_CRCERROR = 0;
+        NRF_RADIO->EVENTS_END = 0;
+        NRF_RADIO->EVENTS_ADDRESS = 0;
+        NRF_RADIO->EVENTS_DISABLED = 0;
+        set_red_led(true);
+        red_led_off_time = millis() + 80;
+        NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+        NRF_RADIO->TASKS_RXEN = 1;
+    } else if (NRF_RADIO->EVENTS_END) {
+        NRF_RADIO->EVENTS_END = 0;
+        NRF_RADIO->EVENTS_ADDRESS = 0;
+        NRF_RADIO->EVENTS_DISABLED = 0;
+        NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+        NRF_RADIO->TASKS_RXEN = 1;
+    } else if (NRF_RADIO->STATE == 0) { // Radio Disabled state
+        NRF_RADIO->EVENTS_DISABLED = 0;
+        NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+        NRF_RADIO->TASKS_RXEN = 1;
     }
+
     if (green_led_off_time > 0 && millis() >= green_led_off_time) {
-        set_onboard_led(false);
+        set_green_led(false);
         green_led_off_time = 0;
+    }
+    if (red_led_off_time > 0 && millis() >= red_led_off_time) {
+        set_red_led(false);
+        red_led_off_time = 0;
     }
 }

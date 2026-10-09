@@ -16,6 +16,7 @@
 #include "ble_conn_params.h"
 #include "nrf_sdh.h"
 #include "nrf_sdh_ble.h"
+#include "nrf_sdh_soc.h"
 #include "app_timer.h"
 #include "bsp_btn_ble.h"
 #include "nrf_ble_gatt.h"
@@ -30,6 +31,7 @@
 
 #define DEVICE_NAME                     "ImpactMaster"
 #define APP_BLE_OBSERVER_PRIO           3
+#define APP_SOC_OBSERVER_PRIO           1
 #define APP_BLE_CONN_CFG_TAG            1
 
 #define MIN_CONN_INTERVAL               MSEC_TO_UNITS(20, UNIT_1_25_MS)
@@ -45,6 +47,7 @@ static ble_impact_service_t m_impact_service;
 static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID;
 
 static void on_sensor_telemetry_received(const sensor_telemetry_t * p_data) {
+    bsp_board_led_invert(3); // LED 4: toggle on ACK/telemetry from sensor
     NRF_LOG_INFO("[TIMESLOT] S%d Telemetry: Impact1=%u us (pk:%u) | Elapsed=%u us | RSSI=%d dBm",
                  p_data->sensor_id,
                  p_data->impact1_time_us,
@@ -110,6 +113,11 @@ static void ble_stack_init(void) {
     NRF_SDH_BLE_OBSERVER(m_impact_observer, APP_BLE_OBSERVER_PRIO, ble_impact_service_on_ble_evt, &m_impact_service);
 }
 
+static void soc_evt_handler(uint32_t evt_id, void * p_context) {
+    timeslot_on_soc_evt(evt_id);
+}
+NRF_SDH_SOC_OBSERVER(m_soc_observer, APP_SOC_OBSERVER_PRIO, soc_evt_handler, NULL);
+
 static void gap_params_init(void) {
     ret_code_t              err_code;
     ble_gap_conn_params_t   gap_conn_params;
@@ -151,6 +159,10 @@ int main(void) {
     NRF_LOG_DEFAULT_BACKENDS_INIT();
     APP_ERROR_CHECK(app_timer_init());
     bsp_board_init(BSP_INIT_LEDS);
+    bsp_board_led_off(0);
+    bsp_board_led_off(1);
+    bsp_board_led_off(2);
+    bsp_board_led_off(3);
     APP_ERROR_CHECK(nrf_pwr_mgmt_init());
 
     NRF_LOG_INFO("=============================================");

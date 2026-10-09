@@ -24,4 +24,5 @@ typedef void (*timeslot_data_handler_t)(const sensor_telemetry_t *p_data);
 uint32_t timeslot_init(timeslot_data_handler_t data_handler);
 uint32_t timeslot_request_next(void);
 void timeslot_trigger_immediate_sync(void);
+void timeslot_on_soc_evt(uint32_t evt_id);
 #endif

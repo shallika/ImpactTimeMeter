@@ -7,6 +7,7 @@
 #include "nrf_soc.h"
 #include "nrf_log.h"
 #include "app_timer.h"
+#include "boards.h"
 #include <string.h>
 
 #define SYNC_MAGIC_BYTE           0x59
@@ -15,8 +16,8 @@
 
 static timeslot_data_handler_t   m_data_handler = NULL;
 static uint16_t                  m_epoch_seq = 0;
-static uint8_t                   m_tx_buf[BEACON_PACKET_LEN];
-static uint8_t                   m_rx_buf[SENSOR_REPLY_LEN + 4];
+static uint8_t                   m_tx_buf[BEACON_PACKET_LEN] __attribute__((aligned(4)));
+static uint8_t                   m_rx_buf[SENSOR_REPLY_LEN + 4] __attribute__((aligned(4)));
 static volatile bool             m_in_timeslot = false;
 
 APP_TIMER_DEF(m_timeslot_timer_id);
@@ -46,10 +47,11 @@ static void configure_radio_proprietary(void) {
     NRF_RADIO->PREFIX0 = 0xE7;
     NRF_RADIO->TXADDRESS = 0;
     NRF_RADIO->RXADDRESSES = 1;
-    NRF_RADIO->CRCCNF = (RADIO_CRCCNF_LEN_Two << RADIO_CRCCNF_LEN_Pos) | (RADIO_CRCCNF_SKIPADDR_Include << RADIO_CRCCNF_SKIPADDR_Pos);
+    NRF_RADIO->CRCCNF = 2; // 2 byte CRC, Include Address in CRC calculation
     NRF_RADIO->CRCPOLY = 0x11021;
     NRF_RADIO->CRCINIT = 0xFFFF;
     NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk;
+    NRF_RADIO->INTENSET = RADIO_INTENSET_DISABLED_Msk | RADIO_INTENSET_CRCOK_Msk | RADIO_INTENSET_CRCERROR_Msk | RADIO_INTENSET_ADDRESS_Msk;
 }
 
 static void prepare_sync_packet(void) {
@@ -71,6 +73,7 @@ static nrf_radio_signal_callback_return_param_t * radio_callback(uint8_t signal_
     switch (signal_type) {
         case NRF_RADIO_CALLBACK_SIGNAL_TYPE_START:
             m_in_timeslot = true;
+            bsp_board_led_invert(2); // LED3 blink on each prop radio sync packet sent
             configure_radio_proprietary();
             NRF_TIMER0->TASKS_STOP = 1;
             NRF_TIMER0->TASKS_CLEAR = 1;
@@ -87,6 +90,23 @@ static nrf_radio_signal_callback_return_param_t * radio_callback(uint8_t signal_
             break;
 
         case NRF_RADIO_CALLBACK_SIGNAL_TYPE_RADIO:
+            if (NRF_RADIO->EVENTS_ADDRESS) {
+                NRF_RADIO->EVENTS_ADDRESS = 0;
+            }
+            if (NRF_RADIO->EVENTS_CRCOK) {
+                NRF_RADIO->EVENTS_CRCOK = 0;
+                bsp_board_led_invert(3); // LED4 blink on valid ACK from sensor
+                if (m_rx_buf[0] >= 1 && m_rx_buf[0] <= 4 && m_data_handler != NULL) {
+                    sensor_telemetry_t telemetry;
+                    memcpy(&telemetry, m_rx_buf, sizeof(sensor_telemetry_t));
+                    telemetry.rssi = (int8_t)(-1 * (int8_t)NRF_RADIO->RSSISAMPLE);
+                    m_data_handler(&telemetry);
+                }
+            }
+            if (NRF_RADIO->EVENTS_CRCERROR) {
+                NRF_RADIO->EVENTS_CRCERROR = 0;
+                bsp_board_led_invert(1); // LED2 blink on CRC error from sensor
+            }
             if (NRF_RADIO->EVENTS_DISABLED) {
                 NRF_RADIO->EVENTS_DISABLED = 0;
                 if (NRF_RADIO->STATE == RADIO_STATE_STATE_Disabled) {
@@ -94,16 +114,6 @@ static nrf_radio_signal_callback_return_param_t * radio_callback(uint8_t signal_
                     NRF_RADIO->PACKETPTR = (uint32_t)m_rx_buf;
                     NRF_RADIO->TASKS_RXEN = 1;
                 }
-            }
-            if (NRF_RADIO->EVENTS_CRCOK) {
-                NRF_RADIO->EVENTS_CRCOK = 0;
-                if (m_rx_buf[0] >= 1 && m_rx_buf[0] <= 4 && m_data_handler != NULL) {
-                    sensor_telemetry_t telemetry;
-                    memcpy(&telemetry, m_rx_buf, sizeof(sensor_telemetry_t));
-                    telemetry.rssi = (int8_t)(-1 * (int8_t)NRF_RADIO->RSSISAMPLE);
-                    m_data_handler(&telemetry);
-                }
-                NRF_RADIO->TASKS_RXEN = 1;
             }
             m_rsc_return_param.callback_action = NRF_RADIO_SIGNAL_CALLBACK_ACTION_NONE;
             break;
@@ -123,7 +133,10 @@ static nrf_radio_signal_callback_return_param_t * radio_callback(uint8_t signal_
 }
 
 static void timeslot_timer_timeout_handler(void * p_context) {
-    sd_radio_request(&m_timeslot_req_earliest);
+    uint32_t err = sd_radio_request(&m_timeslot_req_earliest);
+    if (err != NRF_SUCCESS) {
+        NRF_LOG_WARNING("[TIMESLOT] Timer req err: %u", err);
+    }
 }
 
 uint32_t timeslot_init(timeslot_data_handler_t data_handler) {
@@ -132,9 +145,34 @@ uint32_t timeslot_init(timeslot_data_handler_t data_handler) {
     if (err_code != NRF_SUCCESS) return err_code;
     err_code = app_timer_create(&m_timeslot_timer_id, APP_TIMER_MODE_REPEATED, timeslot_timer_timeout_handler);
     if (err_code != NRF_SUCCESS) return err_code;
-    return app_timer_start(m_timeslot_timer_id, APP_TIMER_TICKS(TIMESLOT_INTERVAL_MS), NULL);
+    err_code = app_timer_start(m_timeslot_timer_id, APP_TIMER_TICKS(TIMESLOT_INTERVAL_MS), NULL);
+    if (err_code != NRF_SUCCESS) return err_code;
+    err_code = sd_radio_request(&m_timeslot_req_earliest);
+    NRF_LOG_INFO("[TIMESLOT] Initial radio request: %u", err_code);
+    return NRF_SUCCESS;
 }
 
 void timeslot_trigger_immediate_sync(void) {
-    sd_radio_request(&m_timeslot_req_earliest);
+    uint32_t err = sd_radio_request(&m_timeslot_req_earliest);
+    NRF_LOG_INFO("[TIMESLOT] Immediate sync req err: %u", err);
+}
+
+void timeslot_on_soc_evt(uint32_t evt_id) {
+    switch (evt_id) {
+        case NRF_EVT_RADIO_BLOCKED:
+            NRF_LOG_WARNING("[TIMESLOT] Blocked! Retrying earliest request...");
+            sd_radio_request(&m_timeslot_req_earliest);
+            break;
+        case NRF_EVT_RADIO_CANCELED:
+            NRF_LOG_WARNING("[TIMESLOT] Canceled! Retrying earliest request...");
+            sd_radio_request(&m_timeslot_req_earliest);
+            break;
+        case NRF_EVT_RADIO_SIGNAL_CALLBACK_INVALID_RETURN:
+            NRF_LOG_ERROR("[TIMESLOT] Invalid callback return!");
+            break;
+        case NRF_EVT_RADIO_SESSION_IDLE:
+            break;
+        default:
+            break;
+    }
 }
