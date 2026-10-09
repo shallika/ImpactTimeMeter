@@ -27,6 +27,15 @@
 #define SENSOR_ID                 1
 #define SYNC_MAGIC_BYTE           0x59
 
+// Optional Serial debugging (0 = disabled for bare-metal RF timing & clean zero-dependency linking)
+#define ENABLE_SERIAL_DEBUG       0
+
+#if ENABLE_SERIAL_DEBUG
+  #if defined(USE_TINYUSB)
+    #include <Adafruit_TinyUSB.h>
+  #endif
+#endif
+
 #if defined(PIN_LED_GREEN)
   #define SENSOR_LED_GREEN PIN_LED_GREEN
 #elif defined(LED_GREEN)
@@ -55,16 +64,16 @@ void setup_radio_receiver() {
     NRF_RADIO->MODE = 1; // 2 Mbps
     NRF_RADIO->FREQUENCY = 50; // 2450 MHz
     NRF_RADIO->TXPOWER = 0x04; // +4 dBm
-    NRF_RADIO->PCNF0 = (8 << 0);
-    NRF_RADIO->PCNF1 = (32 << 0) | (3 << 16) | (0 << 24);
+    NRF_RADIO->PCNF0 = 0; // LFLEN = 0 (no dynamic length byte in packet header)
+    NRF_RADIO->PCNF1 = (32 << 0) | (12 << 8) | (3 << 16) | (0 << 24); // MAXLEN = 32, STATLEN = 12 (Beacon len), BALEN = 3, ENDIAN = Little
     NRF_RADIO->BASE0 = 0xE7E7E700;
     NRF_RADIO->PREFIX0 = 0xE7;
     NRF_RADIO->TXADDRESS = 0;
     NRF_RADIO->RXADDRESSES = 1;
-    NRF_RADIO->CRCCNF = 2;
+    NRF_RADIO->CRCCNF = 2; // 2 byte CRC, SKIPADDR = Include
     NRF_RADIO->CRCPOLY = 0x11021;
     NRF_RADIO->CRCINIT = 0xFFFF;
-    NRF_RADIO->SHORTS = (1 << 0) | (1 << 1);
+    NRF_RADIO->SHORTS = (1 << 0) | (1 << 1); // READY_START | END_DISABLE
     NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
     NRF_RADIO->TASKS_RXEN = 1;
 }
@@ -93,45 +102,111 @@ void send_tdma_reply(int8_t rssi, uint32_t elapsed_us) {
     tx_packet[18] = (uint8_t)rssi;
     tx_packet[19] = 0x01;
 
+    NRF_RADIO->PCNF1 = (20 << 0) | (20 << 8) | (3 << 16) | (0 << 24); // MAXLEN = 20, STATLEN = 20 for 20-byte reply
     NRF_RADIO->PACKETPTR = (uint32_t)tx_packet;
     NRF_RADIO->TASKS_TXEN = 1;
     while (!NRF_RADIO->EVENTS_DISABLED);
     NRF_RADIO->EVENTS_DISABLED = 0;
+
+    NRF_RADIO->PCNF1 = (32 << 0) | (12 << 8) | (3 << 16) | (0 << 24); // Restore MAXLEN = 32, STATLEN = 12 for Beacon RX
     NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
     NRF_RADIO->TASKS_RXEN = 1;
 }
 
+// Helper to turn all known onboard LEDs on or off
+void set_onboard_led(bool state_on) {
+#if defined(LED_GREEN)
+    digitalWrite(LED_GREEN, state_on ? LOW : HIGH);
+#endif
+#if defined(LEDG)
+    digitalWrite(LEDG, state_on ? LOW : HIGH);
+#endif
+#if defined(PIN_LED_GREEN)
+    digitalWrite(PIN_LED_GREEN, state_on ? LOW : HIGH);
+#endif
+#if defined(LED_BUILTIN)
+    digitalWrite(LED_BUILTIN, state_on ? LOW : HIGH);
+#endif
+#if defined(LEDR)
+    digitalWrite(LEDR, state_on ? LOW : HIGH);
+#endif
+#if defined(LED_RED)
+    digitalWrite(LED_RED, state_on ? LOW : HIGH);
+#endif
+    digitalWrite(SENSOR_LED_GREEN, state_on ? LOW : HIGH);
+}
+
 void setup() {
+#if ENABLE_SERIAL_DEBUG
     Serial.begin(115200);
+#endif
     #if defined(SOFTDEVICE_PRESENT)
-      sd_softdevice_disable();
+    uint8_t sd_enabled = 0;
+    if (sd_softdevice_is_enabled(&sd_enabled) == 0 && sd_enabled) {
+        sd_softdevice_disable();
+    }
     #endif
+
+    // Initialize all candidate LED pins
+#if defined(LED_GREEN)
+    pinMode(LED_GREEN, OUTPUT);
+#endif
+#if defined(LEDG)
+    pinMode(LEDG, OUTPUT);
+#endif
+#if defined(PIN_LED_GREEN)
+    pinMode(PIN_LED_GREEN, OUTPUT);
+#endif
+#if defined(LED_BUILTIN)
+    pinMode(LED_BUILTIN, OUTPUT);
+#endif
+#if defined(LEDR)
+    pinMode(LEDR, OUTPUT);
+#endif
+#if defined(LED_RED)
+    pinMode(LED_RED, OUTPUT);
+#endif
     pinMode(SENSOR_LED_GREEN, OUTPUT);
     pinMode(SENSOR_LED_RED, OUTPUT);
-    digitalWrite(SENSOR_LED_GREEN, HIGH);
-    digitalWrite(SENSOR_LED_RED, HIGH);
+
+    // Turn all off initially
+    set_onboard_led(false);
+
+    // 3 quick power-on test blinks so the user can verify the sensor booted and LEDs work!
+    for (int i = 0; i < 3; i++) {
+        set_onboard_led(true);
+        delay(120);
+        set_onboard_led(false);
+        delay(120);
+    }
+
     setup_timer_and_ppi();
     setup_radio_receiver();
+}
+
+static inline uint32_t read_timer1_us() {
+    NRF_TIMER1->TASKS_CAPTURE[1] = 1;
+    return NRF_TIMER1->CC[1];
 }
 
 void loop() {
     if (NRF_RADIO->EVENTS_CRCOK) {
         NRF_RADIO->EVENTS_CRCOK = 0;
         if (rx_packet[0] == SYNC_MAGIC_BYTE) {
-            digitalWrite(SENSOR_LED_GREEN, LOW);
+            set_onboard_led(true);
             green_led_off_time = millis() + 100;
-            uint32_t now_us = NRF_TIMER1->COUNTER;
+            uint32_t now_us = read_timer1_us();
             uint32_t elapsed_us = (last_sync_time_us > 0) ? (now_us - last_sync_time_us) : 1000000;
             last_sync_time_us = now_us;
             int8_t rssi = -1 * (int8_t)NRF_RADIO->RSSISAMPLE;
-            while (NRF_TIMER1->COUNTER < SENSOR_ID * 1000);
+            while (read_timer1_us() < (uint32_t)(SENSOR_ID * 1000));
             send_tdma_reply(rssi, elapsed_us);
         } else {
             NRF_RADIO->TASKS_RXEN = 1;
         }
     }
     if (green_led_off_time > 0 && millis() >= green_led_off_time) {
-        digitalWrite(SENSOR_LED_GREEN, HIGH);
+        set_onboard_led(false);
         green_led_off_time = 0;
     }
 }

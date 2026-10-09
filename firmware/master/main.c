@@ -61,7 +61,8 @@ static void on_sensor_telemetry_received(const sensor_telemetry_t * p_data) {
 
 static void on_ble_ping_received(ble_impact_service_t * p_service, const uint8_t * p_data, uint16_t len) {
     bsp_board_led_invert(1);
-    NRF_LOG_INFO("[BLE] Ping packet received from Android Phone (%d bytes)", len);
+    timeslot_trigger_immediate_sync();
+    NRF_LOG_INFO("[BLE] Ping packet received from Android Phone (%d bytes) -> triggered RF Sync beacon", len);
 }
 
 static void on_ble_config_received(ble_impact_service_t * p_service, const uint8_t * p_data, uint16_t len) {
@@ -128,10 +129,15 @@ static void gap_params_init(void) {
 static void advertising_init(void) {
     ret_code_t             err_code;
     ble_advertising_init_t init;
+    static ble_uuid_t      adv_uuids[] = {{BLE_UUID_IMPACT_SERVICE, BLE_UUID_TYPE_BLE}};
+
     memset(&init, 0, sizeof(init));
     init.advdata.name_type               = BLE_ADVDATA_FULL_NAME;
     init.advdata.include_appearance      = true;
     init.advdata.flags                   = BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE;
+    init.advdata.uuids_complete.uuid_cnt = sizeof(adv_uuids) / sizeof(adv_uuids[0]);
+    init.advdata.uuids_complete.p_uuids  = adv_uuids;
+
     init.config.ble_adv_fast_enabled     = true;
     init.config.ble_adv_fast_interval    = 64;
     init.config.ble_adv_fast_timeout     = 0;

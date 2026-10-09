@@ -64,15 +64,13 @@ uint32_t ble_impact_service_init(ble_impact_service_t * p_service,
                                  ble_impact_config_handler_t config_handler) {
     uint32_t              err_code;
     ble_uuid_t            ble_uuid;
-    ble_uuid128_t         base_uuid = {BLE_UUID_IMPACT_SERVICE_BASE};
     p_service->conn_handle = BLE_CONN_HANDLE_INVALID;
     p_service->is_notification_enabled = false;
     p_service->ping_handler = ping_handler;
     p_service->config_handler = config_handler;
 
-    err_code = sd_ble_uuid_vs_add(&base_uuid, &p_service->uuid_type);
-    VERIFY_SUCCESS(err_code);
-    ble_uuid.type = p_service->uuid_type;
+    p_service->uuid_type = BLE_UUID_TYPE_BLE;
+    ble_uuid.type = BLE_UUID_TYPE_BLE;
     ble_uuid.uuid = BLE_UUID_IMPACT_SERVICE;
 
     err_code = sd_ble_gatts_service_add(BLE_GATTS_SRVC_TYPE_PRIMARY, &ble_uuid, &p_service->service_handle);
@@ -81,7 +79,7 @@ uint32_t ble_impact_service_init(ble_impact_service_t * p_service,
     ble_add_char_params_t add_char_params;
     memset(&add_char_params, 0, sizeof(add_char_params));
     add_char_params.uuid              = BLE_UUID_TELEMETRY_CHAR;
-    add_char_params.uuid_type         = p_service->uuid_type;
+    add_char_params.uuid_type         = BLE_UUID_TYPE_BLE;
     add_char_params.char_props.notify = 1;
     add_char_params.char_props.read   = 1;
     add_char_params.max_len           = 64;
@@ -93,7 +91,7 @@ uint32_t ble_impact_service_init(ble_impact_service_t * p_service,
 
     memset(&add_char_params, 0, sizeof(add_char_params));
     add_char_params.uuid              = BLE_UUID_PING_CHAR;
-    add_char_params.uuid_type         = p_service->uuid_type;
+    add_char_params.uuid_type         = BLE_UUID_TYPE_BLE;
     add_char_params.char_props.read   = 1;
     add_char_params.char_props.write  = 1;
     add_char_params.char_props.write_wo_resp = 1;
@@ -106,7 +104,7 @@ uint32_t ble_impact_service_init(ble_impact_service_t * p_service,
 
     memset(&add_char_params, 0, sizeof(add_char_params));
     add_char_params.uuid              = BLE_UUID_CONFIG_CHAR;
-    add_char_params.uuid_type         = p_service->uuid_type;
+    add_char_params.uuid_type         = BLE_UUID_TYPE_BLE;
     add_char_params.char_props.read   = 1;
     add_char_params.char_props.write  = 1;
     add_char_params.max_len           = 32;
